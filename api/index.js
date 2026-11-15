@@ -1,3 +1,3 @@
 'use strict';
 // Vercel serverless entry. vercel.json rewrites /api/* here.
-module.exports = require('../app');
+module.exports = require('../lib/app');

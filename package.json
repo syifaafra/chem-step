@@ -5,8 +5,8 @@
   "description": "ChemStep - guided stoichiometry learning (static frontend + Express API, in-memory, Vercel-ready)",
   "main": "api/index.js",
   "scripts": {
-    "dev": "node server.js",
-    "start": "node server.js",
+    "dev": "node dev-server.js",
+    "start": "node dev-server.js",
     "test": "node --test test/api.test.js"
   },
   "engines": { "node": ">=18" },

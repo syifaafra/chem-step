@@ -6,13 +6,13 @@ Platform belajar stoikiometri bertahap (60 soal, 12 submateri). Frontend statis 
 
 ```
 ├── api/index.js       # entry serverless Vercel (re-export app Express)
-├── app.js             # Express app: semua route /api/*
+├── dev-server.js      # server lokal (static + API)
 ├── lib/
+│   ├── app.js         # Express app: semua route /api/*
 │   ├── store.js       # penyimpanan progres in-memory
 │   └── answer.js      # logika pencocokan jawaban
 ├── data/              # topics.js & questions.js (bank soal)
 ├── public/index.html  # frontend (di-serve sebagai static oleh Vercel)
-├── server.js          # server lokal (static + API)
 ├── test/api.test.js
 └── vercel.json        # rewrite /api/* -> function
 ```
@@ -30,7 +30,7 @@ npm test
 **Via dashboard (paling mudah)**
 1. Push folder ini ke GitHub.
 2. Di vercel.com → **Add New → Project** → import repo.
-3. Framework Preset: **Other**. Build/Output setting biarkan default (kosong). Klik **Deploy**.
+3. Framework Preset: **Other** (`vercel.json` sudah mengatur output ke `public/`, tidak perlu build). Klik **Deploy**.
 
 **Via CLI**
 ```bash
@@ -70,10 +70,14 @@ Vercel menjalankan backend sebagai *serverless function*. Data in-memory hanya h
 - hilang saat **cold start** atau **redeploy**,
 - **tidak dibagi** antar-instance (request berbeda bisa mendarat di instance berbeda).
 
-Untuk mengurangi dampaknya, frontend tetap menyimpan salinan progres di `localStorage` dan mengirimnya lewat `PUT /api/progress` setiap halaman dibuka, sehingga progres pengguna tidak hilang. Jika nanti butuh data yang benar-benar persisten/lintas perangkat, cukup ganti isi `lib/store.js` dengan Vercel KV / Upstash Redis / Postgres. Route di `app.js` tidak perlu diubah.
+Untuk mengurangi dampaknya, frontend tetap menyimpan salinan progres di `localStorage` dan mengirimnya lewat `PUT /api/progress` setiap halaman dibuka, sehingga progres pengguna tidak hilang. Jika nanti butuh data yang benar-benar persisten/lintas perangkat, cukup ganti isi `lib/store.js` dengan Vercel KV / Upstash Redis / Postgres. Route di `lib/app.js` tidak perlu diubah.
 
 ## Catatan
 
 - Store dibatasi 5.000 klien (yang paling lama tidak aktif dibuang) agar memori tidak membengkak.
 - Body JSON dibatasi 10 KB; panjang jawaban maksimal 200 karakter.
 - Bank soal ada di `data/questions.js`; jumlah soal per submateri diasumsikan 5 (id → submateri = `floor((id-1)/5)`).
+
+## Troubleshooting
+
+- **`Cannot GET /` di halaman utama**: Vercel mengira project ini aplikasi Express karena ada `app.js`/`server.js` di root. Pastikan file Express ada di `lib/app.js` dan `vercel.json` berisi `"framework": null` + `"outputDirectory": "public"`. Di dashboard Vercel, cek **Settings → Build & Development → Framework Preset = Other**, lalu redeploy.

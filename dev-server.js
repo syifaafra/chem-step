@@ -2,7 +2,7 @@
 // Local dev: serves public/ + the API on http://localhost:3000
 const path = require('path');
 const express = require('express');
-const app = require('./app');
+const app = require('./lib/app');
 
 const root = express();
 root.use(app);

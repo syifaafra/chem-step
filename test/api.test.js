@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const app = require('../app');
+const app = require('../lib/app');
 const store = require('../lib/store');
 
 let server, base;
