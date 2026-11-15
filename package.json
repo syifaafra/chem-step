@@ -1,0 +1,14 @@
+{
+  "name": "chemstep",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ChemStep - guided stoichiometry learning (static frontend + Express API, in-memory, Vercel-ready)",
+  "main": "api/index.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "test": "node --test test/api.test.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": { "express": "^4.21.2" }
+}
