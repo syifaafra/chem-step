@@ -1,14 +1,14 @@
 {
   "name": "chemstep",
   "version": "1.0.0",
-  "private": true,
-  "description": "ChemStep - guided stoichiometry learning (static frontend + Express API, in-memory, Vercel-ready)",
-  "main": "api/index.js",
+  "description": "ChemStep — belajar stoikiometri. Frontend PWA + backend Node tanpa dependency, dengan akun Guru & Siswa (RBAC).",
+  "main": "server.js",
   "scripts": {
-    "dev": "node dev-server.js",
-    "start": "node dev-server.js",
-    "test": "node --test test/api.test.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test.js"
   },
   "engines": { "node": ">=18" },
-  "dependencies": { "express": "^4.21.2" }
+  "license": "MIT",
+  "private": true
 }

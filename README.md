@@ -1,83 +1,90 @@
 # ChemStep
 
-Platform belajar stoikiometri bertahap (60 soal, 12 submateri). Frontend statis + backend Express **in-memory** (tanpa database), siap deploy di Vercel.
+Frontend PWA + backend Node.js (tanpa dependency). Mendukung **dua peran pengguna — Guru dan Siswa** —
+dengan halaman masuk, dashboard, navigasi, dan hak akses yang terpisah (Role-Based Access Control).
 
-## Struktur
-
-```
-├── api/index.js       # entry serverless Vercel (re-export app Express)
-├── dev-server.js      # server lokal (static + API)
-├── lib/
-│   ├── app.js         # Express app: semua route /api/*
-│   ├── store.js       # penyimpanan progres in-memory
-│   └── answer.js      # logika pencocokan jawaban
-├── data/              # topics.js & questions.js (bank soal)
-├── public/index.html  # frontend (di-serve sebagai static oleh Vercel)
-├── test/api.test.js
-└── vercel.json        # rewrite /api/* -> function
-```
-
-## Jalankan lokal
-
+## Jalankan
 ```bash
-npm install
-npm run dev      # http://localhost:3000
-npm test
+npm start        # http://localhost:3000
+npm test         # tes API (auth, RBAC, progres, tugas, materi) + file statis
 ```
 
-## Deploy ke Vercel
+Saat dijalankan di luar production dan database masih kosong, server membuat akun demo:
 
-**Via dashboard (paling mudah)**
-1. Push folder ini ke GitHub.
-2. Di vercel.com → **Add New → Project** → import repo.
-3. Framework Preset: **Other** (`vercel.json` sudah mengatur output ke `public/`, tidak perlu build). Klik **Deploy**.
+| Peran | Username | Kata sandi |
+|---|---|---|
+| Guru | `guru` | `guru123` |
+| Siswa | `siswa` | `siswa123` (sudah tergabung di kelas guru demo) |
 
-**Via CLI**
-```bash
-npm i -g vercel
-vercel          # preview
-vercel --prod   # production
-```
+### Variabel lingkungan
+| Variabel | Default | Fungsi |
+|---|---|---|
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | alamat server |
+| `DATA_FILE` | `./data/chemstep-db.json` | file penyimpanan data. Isi `memory` untuk mode in-memory murni |
+| `TEACHER_SIGNUP_CODE` | dev: `GURU-CHEMSTEP`; production: acak (dicetak di log) | kode wajib untuk mendaftar sebagai **guru** |
+| `SEED_DEMO` | aktif di luar production | `0` = jangan buat akun demo, `1` = paksa buat (juga di production) |
+| `COOKIE_SECURE` | otomatis dari HTTPS | `1` = selalu kirim cookie dengan flag `Secure` |
 
-Tidak ada environment variable wajib. `CORS_ORIGIN` (lihat `.env.example`) hanya perlu jika frontend di-host di domain lain.
+## Alur pengguna
+1. **Pilih peran** — halaman awal menampilkan dua pilihan: *Guru* atau *Siswa*.
+2. **Masuk / daftar sesuai peran** (`#/masuk/guru`, `#/masuk/siswa`, `#/daftar/...`).
+   - Guru mendaftar dengan **kode registrasi guru** (dari admin).
+   - Siswa mendaftar dengan **kode kelas** 6 karakter dari gurunya, atau dibuatkan akun oleh guru.
+3. **Validasi peran di server** — akun siswa yang mencoba masuk lewat halaman Guru (atau sebaliknya) ditolak
+   (`403 ROLE_MISMATCH`), tanpa sesi dibuat. Layar menampilkan tombol untuk pindah ke halaman peran yang benar.
+4. **Keluar** — dari menu profil (kanan atas) atau tombol *Keluar* di sidebar, dengan konfirmasi. Setelah keluar,
+   pengguna kembali ke halaman pilih peran. Progres siswa disinkronkan dulu sebelum keluar.
+
+## Hak akses
+| Fitur | Guru | Siswa |
+|---|:-:|:-:|
+| Dashboard kelas (statistik, siswa perlu perhatian, langkah tersering keliru) | ✔ | |
+| Data siswa: tambah, detail + jawaban langkah, reset sandi, reset progres, hapus, kode kelas | ✔ | |
+| Kelola tugas (pilih soal, tenggat, status per siswa) | ✔ | |
+| Kelola materi (catatan / tautan per submateri) | ✔ | |
+| Bank soal dengan kunci & pembahasan + statistik kelas per soal | ✔ | |
+| Laporan Mode Kuis seluruh siswa | ✔ | |
+| Beranda, Peta Belajar, Latihan Soal bertahap, Mode Kuis, Progres Saya (fitur lama) | | ✔ |
+| Tugas dari guru & Materi dari guru | | ✔ |
+| Ubah kata sandi sendiri | ✔ | ✔ |
+
+Pembatasan dilakukan di **dua lapis**: router frontend mengalihkan halaman yang bukan haknya, dan setiap endpoint
+API memeriksa peran dari sesi di server (bukan dari data yang dikirim browser).
 
 ## API
+Semua request yang mengubah data wajib `Content-Type: application/json` (perlindungan CSRF sederhana).
+Sesi memakai cookie `HttpOnly; SameSite=Lax` (berlaku 7 hari); kata sandi di-hash dengan scrypt.
 
-Semua response JSON. Endpoint progres membutuhkan header `X-Client-Id` (8–64 karakter: huruf/angka/`_`/`-`). Frontend membuat ID acak otomatis dan menyimpannya di `localStorage`.
+| Method | Path | Akses | Fungsi |
+|---|---|---|---|
+| GET | `/api/health` | publik | health check |
+| POST | `/api/auth/login` | publik | `{role, username, password}` |
+| POST | `/api/auth/register` | publik | `{role, name, username, password, code}` |
+| POST | `/api/auth/logout` | publik | hapus sesi |
+| GET | `/api/auth/me` | login | data akun aktif |
+| POST | `/api/auth/password` | login | `{oldPassword, newPassword}` |
+| GET/PUT/DELETE | `/api/progress` | siswa | progres & draf langkah milik sendiri |
+| POST / GET | `/api/quiz-results` | siswa | kirim / lihat hasil kuis sendiri |
+| GET | `/api/stats` | login | rata-rata skor kuis semua pengguna (anonim) |
+| GET | `/api/assignments`, `/api/materials` | login | guru: miliknya; siswa: dari gurunya |
+| POST/PUT/DELETE | `/api/assignments[/:id]`, `/api/materials[/:id]` | guru | kelola tugas & materi |
+| GET | `/api/teacher/overview` | guru | ringkasan seluruh siswa + hasil kuis kelas |
+| POST | `/api/teacher/class-code` | guru | buat kode kelas baru |
+| POST | `/api/teacher/students` | guru | buat akun siswa |
+| GET/DELETE | `/api/teacher/students/:id` | guru | detail / hapus siswa (hanya siswa di kelasnya) |
+| POST | `/api/teacher/students/:id/password` | guru | reset kata sandi siswa |
+| DELETE | `/api/teacher/students/:id/progress` | guru | reset progres siswa |
 
-| Method | Path | Keterangan |
-|---|---|---|
-| GET | `/api/health` | Cek status |
-| GET | `/api/topics` | 12 submateri + jumlah soal |
-| GET | `/api/questions?topic=0-11&level=Basic&q=kata` | Daftar soal (semua filter opsional). Kunci jawaban **tidak** disertakan |
-| GET | `/api/questions/:id` | Detail satu soal (id 1–60) |
-| POST | `/api/questions/:id/check` | Body `{"answer":"110 gram"}` → `{"correct":true,"saved":true}`. Jika benar dan ada `X-Client-Id`, progres tersimpan |
-| GET | `/api/progress` | Progres klien: `learned`, `done`, `total`, `percent`, ringkasan per submateri |
-| PUT | `/api/progress` | Body `{"learned":[1,2,3]}` → gabungkan id soal ke progres (dipakai frontend untuk sinkron ulang) |
-| DELETE | `/api/progress` | Reset progres klien |
+## Penyimpanan data
+- Data (akun, sesi, progres, hasil kuis, tugas, materi) disimpan di memori dan ditulis ke `DATA_FILE`
+  (penulisan atomik, ter-debounce) sehingga **tidak hilang saat server restart**.
+- Frontend tetap offline-first: progres siswa disimpan juga di localStorage **per akun** dan disinkronkan saat online.
+  Progres lama dari versi tanpa akun otomatis dipindahkan ke akun siswa pertama yang masuk di perangkat itu.
+- Jalankan **1 instance saja** (data tidak dibagi antar instance).
+- Di Docker, data ada di volume `/app/data`. Di Render paket gratis, disk tidak permanen — pasang persistent disk
+  dan atur `DATA_FILE` bila data akun harus awet.
 
-Contoh:
-```bash
-curl -X POST https://<app>.vercel.app/api/questions/1/check \
-  -H "Content-Type: application/json" -H "X-Client-Id: demo-client-001" \
-  -d '{"answer":"110 gram"}'
-```
-
-## Penting: batasan in-memory di Vercel
-
-Vercel menjalankan backend sebagai *serverless function*. Data in-memory hanya hidup selama instance function itu "hangat":
-
-- hilang saat **cold start** atau **redeploy**,
-- **tidak dibagi** antar-instance (request berbeda bisa mendarat di instance berbeda).
-
-Untuk mengurangi dampaknya, frontend tetap menyimpan salinan progres di `localStorage` dan mengirimnya lewat `PUT /api/progress` setiap halaman dibuka, sehingga progres pengguna tidak hilang. Jika nanti butuh data yang benar-benar persisten/lintas perangkat, cukup ganti isi `lib/store.js` dengan Vercel KV / Upstash Redis / Postgres. Route di `lib/app.js` tidak perlu diubah.
-
-## Catatan
-
-- Store dibatasi 5.000 klien (yang paling lama tidak aktif dibuang) agar memori tidak membengkak.
-- Body JSON dibatasi 10 KB; panjang jawaban maksimal 200 karakter.
-- Bank soal ada di `data/questions.js`; jumlah soal per submateri diasumsikan 5 (id → submateri = `floor((id-1)/5)`).
-
-## Troubleshooting
-
-- **`Cannot GET /` di halaman utama**: Vercel mengira project ini aplikasi Express karena ada `app.js`/`server.js` di root. Pastikan file Express ada di `lib/app.js` dan `vercel.json` berisi `"framework": null` + `"outputDirectory": "public"`. Di dashboard Vercel, cek **Settings → Build & Development → Framework Preset = Other**, lalu redeploy.
+## Catatan keamanan
+Kunci jawaban soal masih tertanam di frontend (pemeriksaan langkah dilakukan di browser, seperti versi sebelumnya).
+Halaman *Bank Soal & Kunci* hanya ditampilkan untuk guru, tetapi siswa yang paham teknis tetap bisa membacanya
+dari kode sumber. Untuk ujian sungguhan, pemeriksaan jawaban perlu dipindah ke server.

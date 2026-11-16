@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: chemstep
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TEACHER_SIGNUP_CODE   # kode yang diberikan admin kepada guru untuk mendaftar
+        generateValue: true
+      # Disk Render gratis tidak permanen. Untuk data akun yang awet, pasang persistent disk
+      # (paket berbayar) di /var/data lalu set DATA_FILE=/var/data/chemstep-db.json
