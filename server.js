@@ -1,40 +1,12 @@
 'use strict';
 /**
- * ChemStep backend — tanpa dependency.
+ * ChemStep backend — Express + Node.js.
  * Autentikasi berbasis peran (RBAC) dengan 2 peran: "guru" dan "siswa".
  *
  * Data disimpan di memori dan (opsional) ditulis ke file JSON (DATA_FILE) agar
  * akun, sesi, progres, tugas, dan materi tidak hilang saat server restart.
- *
- * Publik
- *  GET    /api/health
- *  POST   /api/auth/login            <- { role, username, password }
- *  POST   /api/auth/register         <- { role, name, username, password, code }
- *  POST   /api/auth/logout
- *  GET    /api/auth/me
- *  POST   /api/auth/password         <- { oldPassword, newPassword }   (login)
- *
- * Siswa
- *  GET/PUT/DELETE /api/progress      progres & draf langkah milik akun sendiri
- *  POST   /api/quiz-results          <- { topic, score, total, seconds }
- *
- * Guru & Siswa
- *  GET    /api/assignments           guru: tugas buatannya; siswa: tugas dari gurunya
- *  GET    /api/materials             guru: materi buatannya; siswa: materi dari gurunya
- *  GET    /api/stats                 ringkasan anonim hasil kuis
- *
- * Guru
- *  POST/PUT/DELETE /api/assignments[/:id]
- *  POST/PUT/DELETE /api/materials[/:id]
- *  GET    /api/teacher/overview
- *  POST   /api/teacher/class-code
- *  POST   /api/teacher/students
- *  GET    /api/teacher/students/:id
- *  POST   /api/teacher/students/:id/password
- *  DELETE /api/teacher/students/:id
- *  DELETE /api/teacher/students/:id/progress
  */
-const http = require('http');
+const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -46,8 +18,9 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 // DATA_FILE="" atau "memory" -> murni in-memory (tanpa file)
+// Di Vercel, filesystem proyek bersifat read-only sehingga default diarahkan ke /tmp
 const DATA_FILE = process.env.DATA_FILE === undefined
-  ? path.join(__dirname, 'data', 'chemstep-db.json')
+  ? (process.env.VERCEL ? path.join('/tmp', 'chemstep-db.json') : path.join(__dirname, 'data', 'chemstep-db.json'))
   : (/^(|memory|:memory:)$/i.test(process.env.DATA_FILE) ? null : path.resolve(process.env.DATA_FILE));
 
 const TOTAL_QUESTIONS = 70;        // id soal 1..70
@@ -691,12 +664,16 @@ function serveStatic(req, res, url) {
   res.end(req.method === 'HEAD' ? undefined : body);
 }
 
-// ---------- server ----------
+// ---------- server Express ----------
 loadDB();
 const ready = seedDemo().catch(e => console.error(e));
 
-const server = http.createServer(async (req, res) => {
+const app = express();
+app.disable('x-powered-by');
+
+app.use(async (req, res) => {
   try {
+    await ready;
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     return serveStatic(req, res, url);
@@ -706,17 +683,34 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) sendJSON(res, 500, { error: 'Terjadi kesalahan pada server' });
   }
 });
-server.ready = ready;
+app.ready = ready;
 
-server.keepAliveTimeout = 65000;
+let activeServer = null;
+const origListen = app.listen.bind(app);
+app.listen = (...args) => {
+  activeServer = origListen(...args);
+  activeServer.on('listening', () => app.emit('listening'));
+  activeServer.on('close', () => app.emit('close'));
+  return activeServer;
+};
+app.address = () => (activeServer ? activeServer.address() : null);
+app.close = cb => (activeServer ? activeServer.close(cb) : cb && cb());
+Object.defineProperty(app, 'listening', {
+  get: () => Boolean(activeServer && activeServer.listening),
+});
+
 if (require.main === module) {
-  ready.then(() => server.listen(PORT, HOST, () => {
-    console.log(`ChemStep berjalan di http://${HOST}:${PORT}`);
-    console.log(DATA_FILE ? `Data disimpan di ${DATA_FILE}` : 'Mode in-memory: data hilang saat server berhenti.');
-    console.log(process.env.TEACHER_SIGNUP_CODE ? 'Kode registrasi guru: (dari TEACHER_SIGNUP_CODE)' : `Kode registrasi guru: ${TEACHER_CODE}`);
-  }));
-  const stop = () => { saveNow(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); };
-  process.on('SIGTERM', stop);
-  process.on('SIGINT', stop);
+  ready.then(() => {
+    const server = app.listen(PORT, HOST, () => {
+      console.log(`ChemStep berjalan di http://${HOST}:${PORT}`);
+      console.log(DATA_FILE ? `Data disimpan di ${DATA_FILE}` : 'Mode in-memory: data hilang saat server berhenti.');
+      console.log(process.env.TEACHER_SIGNUP_CODE ? 'Kode registrasi guru: (dari TEACHER_SIGNUP_CODE)' : `Kode registrasi guru: ${TEACHER_CODE}`);
+    });
+    server.keepAliveTimeout = 65000;
+    const stop = () => { saveNow(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); };
+    process.on('SIGTERM', stop);
+    process.on('SIGINT', stop);
+  });
 }
-module.exports = server;
+
+module.exports = app;

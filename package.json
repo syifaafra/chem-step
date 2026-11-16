@@ -1,14 +1,19 @@
 {
   "name": "chemstep",
   "version": "1.0.0",
-  "description": "ChemStep — belajar stoikiometri. Frontend PWA + backend Node tanpa dependency, dengan akun Guru & Siswa (RBAC).",
+  "description": "ChemStep — belajar stoikiometri. Frontend PWA + backend Node Express, dengan akun Guru & Siswa (RBAC).",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node test.js"
   },
-  "engines": { "node": ">=18" },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT",
   "private": true
 }
