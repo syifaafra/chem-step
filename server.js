@@ -1,10 +1,40 @@
 'use strict';
 /**
- * ChemStep backend — Express + Node.js.
+ * ChemStep backend — Express + Node.js (kompatibel lokal, Docker/Render, dan Vercel).
  * Autentikasi berbasis peran (RBAC) dengan 2 peran: "guru" dan "siswa".
  *
  * Data disimpan di memori dan (opsional) ditulis ke file JSON (DATA_FILE) agar
- * akun, sesi, progres, tugas, dan materi tidak hilang saat server restart.
+ * akun, progres, tugas, dan materi tidak hilang saat server restart.
+ * Sesi menggunakan token bertanda tangan HMAC (stateless) agar tetap valid di
+ * lingkungan serverless multi-instance seperti Vercel.
+ *
+ * Publik
+ *  GET    /api/health
+ *  POST   /api/auth/login            <- { role, username, password }
+ *  POST   /api/auth/register         <- { role, name, username, password, code }
+ *  POST   /api/auth/logout
+ *  GET    /api/auth/me
+ *  POST   /api/auth/password         <- { oldPassword, newPassword }   (login)
+ *
+ * Siswa
+ *  GET/PUT/DELETE /api/progress      progres & draf langkah milik akun sendiri
+ *  POST   /api/quiz-results          <- { topic, score, total, seconds }
+ *
+ * Guru & Siswa
+ *  GET    /api/assignments           guru: tugas buatannya; siswa: tugas dari gurunya
+ *  GET    /api/materials             guru: materi buatannya; siswa: materi dari gurunya
+ *  GET    /api/stats                 ringkasan anonim hasil kuis
+ *
+ * Guru
+ *  POST/PUT/DELETE /api/assignments[/:id]
+ *  POST/PUT/DELETE /api/materials[/:id]
+ *  GET    /api/teacher/overview
+ *  POST   /api/teacher/class-code
+ *  POST   /api/teacher/students
+ *  GET    /api/teacher/students/:id
+ *  POST   /api/teacher/students/:id/password
+ *  DELETE /api/teacher/students/:id
+ *  DELETE /api/teacher/students/:id/progress
  */
 const express = require('express');
 const fs = require('fs');
@@ -18,7 +48,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 // DATA_FILE="" atau "memory" -> murni in-memory (tanpa file)
-// Di Vercel, filesystem proyek bersifat read-only sehingga default diarahkan ke /tmp
+// Di Vercel, direktori proyek bersifat read-only sehingga default diarahkan ke /tmp
 const DATA_FILE = process.env.DATA_FILE === undefined
   ? (process.env.VERCEL ? path.join('/tmp', 'chemstep-db.json') : path.join(__dirname, 'data', 'chemstep-db.json'))
   : (/^(|memory|:memory:)$/i.test(process.env.DATA_FILE) ? null : path.resolve(process.env.DATA_FILE));
@@ -42,15 +72,15 @@ const TEACHER_CODE = process.env.TEACHER_SIGNUP_CODE ||
 // ---------- penyimpanan ----------
 const db = {
   users: new Map(),        // id -> { id, role, name, username, salt, hash, teacherId?, classCode?, createdAt }
-  sessions: new Map(),     // sha256(token) -> { userId, exp }
   progress: new Map(),     // userId -> { learned, drafts, updatedAt }
   results: [],             // { userId, topic, score, total, seconds, at }
   assignments: new Map(),  // id -> { id, teacherId, title, description, questionIds, due, createdAt, updatedAt }
   materials: new Map(),    // id -> { id, teacherId, title, topic, body, link, createdAt, updatedAt }
   activity: new Map(),     // userId -> timestamp aktivitas terakhir
 };
-const hits = new Map();       // ip -> { n, reset }
-const loginFails = new Map(); // ip|username -> { n, reset }
+const hits = new Map();            // ip -> { n, reset }
+const loginFails = new Map();      // ip|username -> { n, reset }
+const revokedSessions = new Map(); // sid -> exp
 
 function loadDB() {
   if (!DATA_FILE) return;
@@ -60,7 +90,6 @@ function loadDB() {
     return;
   }
   for (const u of raw.users || []) db.users.set(u.id, u);
-  for (const [k, v] of Object.entries(raw.sessions || {})) db.sessions.set(k, v);
   for (const [k, v] of Object.entries(raw.progress || {})) db.progress.set(k, v);
   db.results = Array.isArray(raw.results) ? raw.results : [];
   for (const a of raw.assignments || []) db.assignments.set(a.id, a);
@@ -73,7 +102,6 @@ function snapshot() {
   return JSON.stringify({
     version: 1,
     users: [...db.users.values()],
-    sessions: Object.fromEntries(db.sessions),
     progress: Object.fromEntries(db.progress),
     results: db.results,
     assignments: [...db.assignments.values()],
@@ -91,21 +119,25 @@ function saveNow() {
     fs.renameSync(tmp, DATA_FILE);
   } catch (e) { console.error('Gagal menyimpan DATA_FILE:', e.message); }
 }
-function persist() { if (DATA_FILE && !saveTimer) saveTimer = setTimeout(saveNow, 400); }
+function persist() {
+  if (!DATA_FILE) return;
+  if (process.env.VERCEL) { saveNow(); return; }
+  if (!saveTimer) saveTimer = setTimeout(saveNow, 400);
+}
 
 function sweep() {
   const now = Date.now();
-  let changed = false;
-  for (const [k, s] of db.sessions) if (now > s.exp || !db.users.has(s.userId)) { db.sessions.delete(k); changed = true; }
+  for (const [sid, exp] of revokedSessions) if (now > exp) revokedSessions.delete(sid);
   for (const [ip, h] of hits) if (now > h.reset) hits.delete(ip);
   for (const [k, h] of loginFails) if (now > h.reset) loginFails.delete(k);
-  if (changed) persist();
 }
 setInterval(sweep, 10 * 60 * 1000).unref();
 
 // ---------- util ----------
 const newId = () => crypto.randomBytes(8).toString('hex');
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+const SESSION_SECRET = sha(process.env.SESSION_SECRET || process.env.TEACHER_SIGNUP_CODE || 'chemstep-default-secret');
+
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function newClassCode() {
   for (;;) {
@@ -251,23 +283,42 @@ function sessionCookie(req, token, maxAgeSec) {
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}` + (isHttps(req) ? '; Secure' : '');
 }
 
+function signSession(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
 function getSession(req) {
   const token = parseCookies(req)[SESSION_COOKIE];
-  if (!token || token.length > 100) return null;
-  const key = sha(token);
-  const s = db.sessions.get(key);
-  if (!s) return null;
-  if (Date.now() > s.exp) { db.sessions.delete(key); persist(); return null; }
-  const user = db.users.get(s.userId);
-  if (!user) { db.sessions.delete(key); persist(); return null; }
-  return { key, user };
+  if (!token || token.length > 400) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+
+  const [data, sig] = parts;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  const a = Buffer.from(sig), b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+  let payload;
+  try { payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8')); } catch { return null; }
+  if (!payload || typeof payload !== 'object') return null;
+  if (Date.now() > payload.exp || revokedSessions.has(payload.sid)) return null;
+
+  const user = db.users.get(payload.uid);
+  if (!user) return null;
+  if (payload.pwv && user.hash.slice(0, 8) !== payload.pwv) return null;
+  return { key: payload.sid, exp: payload.exp, user };
 }
 
 function createSession(userId) {
-  const token = crypto.randomBytes(32).toString('base64url');
-  db.sessions.set(sha(token), { userId, exp: Date.now() + SESSION_TTL });
-  persist();
-  return token;
+  const u = db.users.get(userId);
+  return signSession({
+    uid: userId,
+    sid: newId(),
+    pwv: u ? u.hash.slice(0, 8) : '',
+    exp: Date.now() + SESSION_TTL,
+  });
 }
 
 function publicUser(u) {
@@ -323,7 +374,6 @@ function removeUserData(userId) {
   db.progress.delete(userId);
   db.activity.delete(userId);
   db.results = db.results.filter(r => r.userId !== userId);
-  for (const [k, s] of db.sessions) if (s.userId === userId) db.sessions.delete(k);
 }
 
 // ---------- validasi akun ----------
@@ -338,12 +388,12 @@ function validateAccount(b, { needCode = false } = {}) {
   if ([...db.users.values()].some(u => u.username === username)) fail(409, 'Username sudah dipakai. Pilih username lain.');
   return { name, username, password };
 }
-async function createUser({ role, name, username, password, teacherId }) {
+async function createUser({ id, role, name, username, password, teacherId, classCode }) {
   const { salt, hash } = await hashPassword(password);
   // cek ulang setelah await (hindari duplikasi bila dua request bersamaan)
   if ([...db.users.values()].some(u => u.username === username)) fail(409, 'Username sudah dipakai. Pilih username lain.');
-  const u = { id: newId(), role, name, username, salt, hash, createdAt: Date.now() };
-  if (role === 'guru') u.classCode = newClassCode();
+  const u = { id: id || newId(), role, name, username, salt, hash, createdAt: Date.now() };
+  if (role === 'guru') u.classCode = classCode || newClassCode();
   if (role === 'siswa') u.teacherId = teacherId;
   db.users.set(u.id, u);
   persist();
@@ -415,7 +465,7 @@ async function handleApi(req, res, url) {
 
   if (p === '/api/auth/logout' && method === 'POST') {
     const s = getSession(req);
-    if (s) { db.sessions.delete(s.key); persist(); }
+    if (s) revokedSessions.set(s.key, s.exp);
     return sendJSON(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
 
@@ -434,9 +484,9 @@ async function handleApi(req, res, url) {
     if (!(await verifyPassword(typeof b.oldPassword === 'string' ? b.oldPassword : '', me))) fail(400, 'Kata sandi lama salah.');
     if (np.length < 6 || np.length > 128) fail(400, 'Kata sandi baru minimal 6 karakter.');
     Object.assign(me, await hashPassword(np));
-    for (const [k, s] of db.sessions) if (s.userId === me.id && k !== sess.key) db.sessions.delete(k); // keluarkan sesi lain
     persist();
-    return sendJSON(res, 200, { ok: true });
+    const newToken = createSession(me.id);
+    return sendJSON(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, newToken, SESSION_TTL / 1000) });
   }
 
   // ----- progres (siswa) -----
@@ -583,7 +633,6 @@ async function handleApi(req, res, url) {
       const pw = typeof b.password === 'string' ? b.password : '';
       if (pw.length < 6 || pw.length > 128) fail(400, 'Kata sandi minimal 6 karakter.');
       Object.assign(s, await hashPassword(pw));
-      for (const [k, x] of db.sessions) if (x.userId === s.id) db.sessions.delete(k);
       persist();
       return sendJSON(res, 200, { ok: true });
     }
@@ -599,11 +648,25 @@ async function handleApi(req, res, url) {
   return sendJSON(res, 404, { error: 'Endpoint tidak ditemukan' });
 }
 
-// ---------- akun demo (hanya di luar production, saat database kosong) ----------
+// ---------- akun demo (hanya di luar production atau saat SEED_DEMO=1, saat database kosong) ----------
 async function seedDemo() {
   if (db.users.size || (IS_PROD && process.env.SEED_DEMO !== '1') || process.env.SEED_DEMO === '0') return;
-  const g = await createUser({ role: 'guru', name: 'Bu Rina Kartika', username: 'guru', password: 'guru123' });
-  await createUser({ role: 'siswa', name: 'Andi Pratama', username: 'siswa', password: 'siswa123', teacherId: g.id });
+  const g = await createUser({
+    id: '0000000000000001',
+    role: 'guru',
+    name: 'Bu Rina Kartika',
+    username: 'guru',
+    password: 'guru123',
+    classCode: 'CHEM01',
+  });
+  await createUser({
+    id: '0000000000000002',
+    role: 'siswa',
+    name: 'Andi Pratama',
+    username: 'siswa',
+    password: 'siswa123',
+    teacherId: g.id,
+  });
   saveNow();
   console.log(`Akun demo dibuat — Guru: guru / guru123 · Siswa: siswa / siswa123 · Kode kelas: ${g.classCode}`);
 }
@@ -685,19 +748,22 @@ app.use(async (req, res) => {
 });
 app.ready = ready;
 
+// Kompatibilitas dengan test.js (server.address, server.close, server.listening)
 let activeServer = null;
 const origListen = app.listen.bind(app);
 app.listen = (...args) => {
   activeServer = origListen(...args);
+  activeServer.keepAliveTimeout = app.keepAliveTimeout || 65000;
   activeServer.on('listening', () => app.emit('listening'));
   activeServer.on('close', () => app.emit('close'));
   return activeServer;
 };
 app.address = () => (activeServer ? activeServer.address() : null);
-app.close = cb => (activeServer ? activeServer.close(cb) : cb && cb());
+app.close = cb => (activeServer ? activeServer.close(cb) : (cb && cb()));
 Object.defineProperty(app, 'listening', {
   get: () => Boolean(activeServer && activeServer.listening),
 });
+app.keepAliveTimeout = 65000;
 
 if (require.main === module) {
   ready.then(() => {
@@ -706,7 +772,6 @@ if (require.main === module) {
       console.log(DATA_FILE ? `Data disimpan di ${DATA_FILE}` : 'Mode in-memory: data hilang saat server berhenti.');
       console.log(process.env.TEACHER_SIGNUP_CODE ? 'Kode registrasi guru: (dari TEACHER_SIGNUP_CODE)' : `Kode registrasi guru: ${TEACHER_CODE}`);
     });
-    server.keepAliveTimeout = 65000;
     const stop = () => { saveNow(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); };
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
