@@ -82,6 +82,16 @@ const hits = new Map();            // ip -> { n, reset }
 const loginFails = new Map();      // ip|username -> { n, reset }
 const revokedSessions = new Map(); // sid -> exp
 
+function applyRaw(raw) {
+  db.users.clear(); db.progress.clear(); db.assignments.clear(); db.materials.clear(); db.activity.clear();
+  for (const u of raw.users || []) db.users.set(u.id, u);
+  for (const [k, v] of Object.entries(raw.progress || {})) db.progress.set(k, v);
+  db.results = Array.isArray(raw.results) ? raw.results : [];
+  for (const a of raw.assignments || []) db.assignments.set(a.id, a);
+  for (const m of raw.materials || []) db.materials.set(m.id, m);
+  for (const [k, v] of Object.entries(raw.activity || {})) db.activity.set(k, v);
+}
+
 function loadDB() {
   if (!DATA_FILE) return;
   let raw;
@@ -89,12 +99,40 @@ function loadDB() {
     if (e.code !== 'ENOENT') console.error('Gagal membaca DATA_FILE:', e.message);
     return;
   }
-  for (const u of raw.users || []) db.users.set(u.id, u);
-  for (const [k, v] of Object.entries(raw.progress || {})) db.progress.set(k, v);
-  db.results = Array.isArray(raw.results) ? raw.results : [];
-  for (const a of raw.assignments || []) db.assignments.set(a.id, a);
-  for (const m of raw.materials || []) db.materials.set(m.id, m);
-  for (const [k, v] of Object.entries(raw.activity || {})) db.activity.set(k, v);
+  applyRaw(raw);
+}
+
+// ---------- penyimpanan bersama (Upstash Redis / Vercel KV lewat REST) ----------
+// Di Vercel (serverless) tiap instance punya memori & /tmp sendiri, sehingga akun yang dibuat di satu
+// instance tidak dikenal instance lain -> request berikutnya 401 -> pengguna langsung ter-logout.
+// Dengan KV, semua instance membaca/menulis satu snapshot yang sama.
+const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const KV_KEY = process.env.KV_DB_KEY || 'chemstep:db';
+const KV_ON = Boolean(KV_URL && KV_TOKEN);
+const SERVERLESS = Boolean(process.env.VERCEL);
+let kvDirty = false;
+
+async function kvCmd(cmd) {
+  const r = await fetch(KV_URL, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + KV_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(cmd),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || ('KV HTTP ' + r.status));
+  return j.result;
+}
+async function kvLoad() {
+  if (!KV_ON) return;
+  const v = await kvCmd(['GET', KV_KEY]);
+  if (v) applyRaw(JSON.parse(v));
+}
+async function kvSave() {
+  if (!KV_ON || !kvDirty) return;
+  kvDirty = false;
+  try { await kvCmd(['SET', KV_KEY, snapshot()]); }
+  catch (e) { kvDirty = true; console.error('Gagal menyimpan ke KV:', e.message); throw e; }
 }
 
 let saveTimer = null;
@@ -111,6 +149,7 @@ function snapshot() {
 }
 function saveNow() {
   clearTimeout(saveTimer); saveTimer = null;
+  if (KV_ON) { kvDirty = true; return kvSave().catch(() => {}); }
   if (!DATA_FILE) return;
   try {
     fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
@@ -120,8 +159,14 @@ function saveNow() {
   } catch (e) { console.error('Gagal menyimpan DATA_FILE:', e.message); }
 }
 function persist() {
+  if (KV_ON) {
+    kvDirty = true;
+    // serverless: disimpan sebelum respons dikirim (lihat middleware). Lainnya: ter-debounce.
+    if (!SERVERLESS && !saveTimer) saveTimer = setTimeout(() => { saveTimer = null; kvSave().catch(() => {}); }, 400);
+    return;
+  }
   if (!DATA_FILE) return;
-  if (process.env.VERCEL) { saveNow(); return; }
+  if (SERVERLESS) { saveNow(); return; }
   if (!saveTimer) saveTimer = setTimeout(saveNow, 400);
 }
 
@@ -412,7 +457,8 @@ async function handleApi(req, res, url) {
   }
 
   if (p === '/api/health' && method === 'GET') {
-    return sendJSON(res, 200, { status: 'ok', uptime: Math.round(process.uptime()), users: db.users.size });
+    return sendJSON(res, 200, { status: 'ok', uptime: Math.round(process.uptime()), users: db.users.size,
+      sharedStorage: KV_ON, ...(SERVERLESS && !KV_ON ? { warning: 'Serverless tanpa KV_REST_API_URL/KV_REST_API_TOKEN: akun tidak dibagi antar instance, login bisa langsung ter-logout.' } : {}) });
   }
 
   // ----- auth publik -----
@@ -669,7 +715,7 @@ async function seedDemo() {
     salt: 'fedcba9876543210fedcba9876543210',
     teacherId: g.id,
   });
-  saveNow();
+  await saveNow();
   console.log(`Akun demo dibuat — Guru: guru / guru123 · Siswa: siswa / siswa123 · Kode kelas: ${g.classCode}`);
 }
 
@@ -731,7 +777,11 @@ function serveStatic(req, res, url) {
 
 // ---------- server Express ----------
 loadDB();
-const ready = seedDemo().catch(e => console.error(e));
+const ready = (async () => {
+  if (KV_ON) await kvLoad();
+  else if (SERVERLESS) console.warn('PERINGATAN: berjalan di Vercel tanpa KV_REST_API_URL/KV_REST_API_TOKEN — akun tidak dibagi antar instance.');
+  await seedDemo();
+})().catch(e => console.error(e));
 
 const app = express();
 app.disable('x-powered-by');
@@ -740,7 +790,19 @@ app.use(async (req, res) => {
   try {
     await ready;
     const url = new URL(req.url, 'http://localhost');
-    if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
+    if (url.pathname.startsWith('/api/')) {
+      if (KV_ON && SERVERLESS) {
+        // sinkronkan dengan snapshot bersama di awal request, dan simpan perubahan sebelum respons selesai
+        await kvLoad();
+        const origEnd = res.end.bind(res);
+        res.end = (...a) => {
+          if (!kvDirty) return origEnd(...a);
+          kvSave().catch(() => {}).finally(() => origEnd(...a));
+          return res;
+        };
+      }
+      return await handleApi(req, res, url);
+    }
     return serveStatic(req, res, url);
   } catch (e) {
     if (e && e.status) return sendJSON(res, e.status, { error: e.msg, ...(e.code ? { code: e.code } : {}) });

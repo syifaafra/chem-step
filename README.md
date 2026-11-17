@@ -75,6 +75,13 @@ Sesi memakai cookie `HttpOnly; SameSite=Lax` (berlaku 7 hari); kata sandi di-has
 | POST | `/api/teacher/students/:id/password` | guru | reset kata sandi siswa |
 | DELETE | `/api/teacher/students/:id/progress` | guru | reset progres siswa |
 
+## Deploy di Vercel (wajib baca)
+Vercel itu serverless: tiap instance punya memori & `/tmp` sendiri. Tanpa penyimpanan bersama, akun yang dibuat/login
+di satu instance tidak dikenal instance lain, sehingga request berikutnya `401` dan pengguna **langsung ter-logout**.
+Solusi: pasang **Upstash Redis** (Vercel → Storage → Marketplace → Upstash Redis, gratis) lalu pastikan env
+`KV_REST_API_URL` dan `KV_REST_API_TOKEN` (atau `UPSTASH_REDIS_REST_URL/TOKEN`) ada di project, kemudian **redeploy**.
+Atur juga `SESSION_SECRET` (string acak panjang) dan `TEACHER_SIGNUP_CODE`. Cek `/api/health` → `"sharedStorage": true`.
+
 ## Penyimpanan data
 - Data (akun, sesi, progres, hasil kuis, tugas, materi) disimpan di memori dan ditulis ke `DATA_FILE`
   (penulisan atomik, ter-debounce) sehingga **tidak hilang saat server restart**.
