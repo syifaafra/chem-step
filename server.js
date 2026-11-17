@@ -388,8 +388,8 @@ function validateAccount(b, { needCode = false } = {}) {
   if ([...db.users.values()].some(u => u.username === username)) fail(409, 'Username sudah dipakai. Pilih username lain.');
   return { name, username, password };
 }
-async function createUser({ id, role, name, username, password, teacherId, classCode }) {
-  const { salt, hash } = await hashPassword(password);
+async function createUser({ id, role, name, username, password, salt: fixedSalt, teacherId, classCode }) {
+  const { salt, hash } = await hashPassword(password, fixedSalt);
   // cek ulang setelah await (hindari duplikasi bila dua request bersamaan)
   if ([...db.users.values()].some(u => u.username === username)) fail(409, 'Username sudah dipakai. Pilih username lain.');
   const u = { id: id || newId(), role, name, username, salt, hash, createdAt: Date.now() };
@@ -657,6 +657,7 @@ async function seedDemo() {
     name: 'Bu Rina Kartika',
     username: 'guru',
     password: 'guru123',
+    salt: '0123456789abcdef0123456789abcdef',
     classCode: 'CHEM01',
   });
   await createUser({
@@ -665,6 +666,7 @@ async function seedDemo() {
     name: 'Andi Pratama',
     username: 'siswa',
     password: 'siswa123',
+    salt: 'fedcba9876543210fedcba9876543210',
     teacherId: g.id,
   });
   saveNow();
